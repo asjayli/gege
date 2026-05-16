@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package gege;
+
+// 代理服务定义
+service AgentPipeline {
+  // 模式一：流式返回 (适合本地、需实时展示且不介意连接断开的场景)
+  rpc ExecuteTaskStream(TaskRequest) returns (stream TaskResponse);
+
+  // 模式二：提交任务 (Fire & Forget，适合需持久化、长生命周期的高可用场景)
+  rpc SubmitTask(TaskRequest) returns (SubmitResponse);
+  
+  // 取消一个正在执行的任务
+  rpc CancelTask(CancelRequest) returns (CancelResponse);
+
+  // 获取当前任务状态和进度简明信息
+  rpc GetTaskStatus(GetStatusRequest) returns (TaskStatusResponse);
+}
+
+enum AgentType {
+  UNKNOWN = 0;
+  CLAUDE_CODE = 1;
+  GEMINI_CLI = 2;
+  CODEX = 3;
+  OPEN_CODE = 4;
+  HEHE_NATIVE = 5;
+}
+
+enum CallbackFormat {
+  DEFAULT = 0;       // Gege 标准 JSON 格式
+  FEISHU_BOT = 1;    // 飞书自定义机器人 Webhook 格式
+  WECOM_BOT = 2;     // 企业微信群机器人 Webhook 格式
+}
+
+message TaskRequest {
+  string task_id = 1;             // 任务的唯一标识
+  AgentType agent_type = 2;       // 指定使用哪个模型/工具
+  string prompt = 3;              // 提示词/任务指令
+  string workspace_dir = 4;       // 工作空间绝对路径 (让Agent知道去哪干活)
+  map<string, string> env_vars = 5; // 环境变量 (如传入特定的 API_KEY，避免硬编码)
+  int32 timeout_seconds = 6;      // 超时时间控制 (0表示不超时)
+  
+  // 安全与鉴权
+  string auth_token = 7;          // 简单的Token鉴权，防止恶意调用，生产可换为mTLS
+  
+  // 回调配置 (仅在 SubmitTask 模式下生效)
+  string callback_url = 8;        // Java端接收回调的REST/HTTP地址
+  map<string, string> callback_headers = 9; // [新增] 回调时携带的 HTTP Headers (用于签名或Java鉴权)
+  CallbackFormat callback_format = 10;      // [新增] 适配各大厂商机器人的 Webhook 格式
+}
+
+message SubmitResponse {
+  bool accepted = 1;
+  string message = 2;
+}
+
+enum TaskStatus {
+  RUNNING = 0;
+  COMPLETED = 1;
+  FAILED = 2;
+  TIMEOUT = 3;
+  CANCELLED = 4;
+}
+
+message TaskResponse {
+  string task_id = 1;
+  TaskStatus status = 2;
+  string log_chunk = 3;           // 实时的 stdout/stderr 输出日志块
+  string final_result = 4;        // 结束后，如果工具有结构化输出可以放在这里
+}
+
+message CancelRequest {
+  string task_id = 1;
+  string auth_token = 2;          // 操作安全鉴权
+}
+
+message CancelResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message GetStatusRequest {
+  string task_id = 1;
+  string auth_token = 2;
+}
+
+message TaskStatusResponse {
+  bool exists = 1;                // 任务是否存在
+  TaskStatus status = 2;          // 任务状态
+  string message = 3;             // 简短的状态说明或最后几行日志
+}
