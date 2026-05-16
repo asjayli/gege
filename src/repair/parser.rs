@@ -68,8 +68,7 @@ impl<'a> JsonParser<'a> {
 
     /// 获取偏移位置的字符
     fn peek_char(&self, offset: usize) -> Option<char> {
-        let chars: Vec<char> = self.input[self.pos..].chars().take(offset + 1).collect();
-        chars.get(offset).copied()
+        self.input[self.pos..].chars().nth(offset)
     }
 
     /// 前进一步（一个字符）

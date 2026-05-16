@@ -1,6 +1,7 @@
 use crate::executors::factory;
 use crate::pipeline::{TaskRequest, TaskResponse, TaskStatus, TaskStatusResponse};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
@@ -42,6 +43,7 @@ pub struct TaskManager {
     tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
     client: Arc<reqwest::Client>,
     max_concurrent: usize,
+    running_count: Arc<AtomicUsize>,
 }
 
 impl Default for TaskManager {
@@ -71,7 +73,9 @@ impl TaskManager {
             }
         });
 
-        Self { tasks, client, max_concurrent: DEFAULT_MAX_CONCURRENT }
+        let running_count = Arc::new(AtomicUsize::new(0));
+
+        Self { tasks, client, max_concurrent: DEFAULT_MAX_CONCURRENT, running_count }
     }
 
     pub async fn get_task_status(&self, task_id: &str) -> TaskStatusResponse {
@@ -107,6 +111,7 @@ impl TaskManager {
         let task_id_update = task_id.clone();
         let client = self.client.clone();
         let max_concurrent = self.max_concurrent;
+        let running_count = self.running_count.clone();
 
         let executor = factory::create_executor(&req.agent_type());
 
@@ -114,9 +119,9 @@ impl TaskManager {
         {
             let mut map = self.tasks.lock().await;
 
-            // 并发上限检查
-            let running_count = map.values().filter(|e| e.handle.is_some()).count();
-            if running_count >= max_concurrent {
+            // 并发上限检查（O(1)）
+            let current_running = self.running_count.load(Ordering::SeqCst);
+            if current_running >= max_concurrent {
                 return Err(anyhow::anyhow!(
                     "max concurrent tasks ({}) reached",
                     max_concurrent
@@ -250,7 +255,10 @@ impl TaskManager {
             // 更新任务状态（保留在 map 中供查询，标记完成时间供 TTL 清理）
             let mut map = tasks_map_inner.lock().await;
             if let Some(entry) = map.get_mut(&task_id_update) {
-                entry.handle = None;
+                if entry.handle.is_some() {
+                    entry.handle = None;
+                    running_count.fetch_sub(1, Ordering::SeqCst);
+                }
                 entry.status = last_status;
                 entry.message = format!("Task finished with status: {}", task_status_to_string(last_status));
                 entry.completed_at = Some(Instant::now());
@@ -266,6 +274,7 @@ impl TaskManager {
                 entry.message = "Task is currently running.".to_string();
             }
         }
+        self.running_count.fetch_add(1, Ordering::SeqCst);
 
         Ok(())
     }
@@ -275,6 +284,7 @@ impl TaskManager {
         if let Some(entry) = map.get_mut(task_id) {
             if let Some(handle) = entry.handle.take() {
                 handle.abort();
+                self.running_count.fetch_sub(1, Ordering::SeqCst);
                 entry.status = TaskStatus::Cancelled as i32;
                 entry.message = "Task was cancelled.".to_string();
                 entry.completed_at = Some(Instant::now());

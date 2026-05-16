@@ -110,8 +110,9 @@ fn strip_polite_prefix(input: &str) -> (String, bool) {
         let prefix_lower = prefix.to_lowercase();
 
         // 精确前缀匹配（大小写不敏感）
-        if lower.starts_with(&prefix_lower) {
-            let after = &trimmed[prefix.len()..];
+        if let Some(rest) = lower.strip_prefix(&prefix_lower) {
+            let prefix_byte_len = trimmed.len() - rest.len();
+            let after = &trimmed[prefix_byte_len..];
             // 跳过分隔符和中间文字，找到第一个 JSON 结构字符
             let json_start = find_json_start(after);
             if let Some(start) = json_start {
