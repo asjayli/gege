@@ -2,6 +2,7 @@ pub mod pipeline {
     tonic::include_proto!("gege");
 }
 
+pub mod config;
 pub mod executors;
 pub mod server;
 pub mod task_manager;
@@ -13,50 +14,52 @@ use pipeline::agent_pipeline_server::AgentPipelineServer;
 use server::AgentPipelineService;
 use std::net::SocketAddr;
 use tonic::transport::Server;
-use std::env;
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::init_from_env(env_logger::Env::default().default_filter_or("info"));
 
-    // Check if SSH tunneling is configured
+    let cfg = config::GegeConfig::from_env();
+
+    // SSH 隧道（可选）
     if let Some(ssh_config) = ssh_tunnel::SshConfig::from_env() {
         tokio::spawn(async move {
             ssh_tunnel::start_ssh_tunnel(ssh_config).await;
         });
     }
 
-    let local_port = env::var("GEGE_LOCAL_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(50051);
-        
-    let http_port = env::var("GEGE_HTTP_PORT")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(8081);
+    // 共享 TaskManager
+    let task_manager = std::sync::Arc::new(task_manager::TaskManager::new());
 
-    // Shared Task Manager for both gRPC and HTTP
-    let task_manager = Arc::new(task_manager::TaskManager::new());
-
-    // Spawn HTTP Server
-    let http_task_manager = task_manager.clone();
+    // HTTP Server
+    let http_tm = task_manager.clone();
+    let http_auth = cfg.auth_token.clone();
+    let http_port = cfg.http_port;
     tokio::spawn(async move {
-        http_server::start_http_server(http_task_manager, http_port).await;
+        http_server::start_http_server(http_tm, http_port, http_auth).await;
     });
 
-    let addr: SocketAddr = format!("127.0.0.1:{}", local_port).parse()?;
-    
-    // Inject shared task manager to gRPC service
-    let pipeline_service = AgentPipelineService::with_manager(task_manager);
+    // gRPC Server + 优雅停机
+    let addr: SocketAddr = format!("127.0.0.1:{}", cfg.local_port).parse()?;
+    let pipeline_service =
+        AgentPipelineService::with_manager(task_manager, cfg.auth_token.clone());
 
     info!("Gege Proxy Layer Server listening on {}", addr);
 
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.ok();
+        info!("Received shutdown signal, stopping gracefully...");
+        let _ = shutdown_tx.send(());
+    });
+
     Server::builder()
         .add_service(AgentPipelineServer::new(pipeline_service))
-        .serve(addr)
+        .serve_with_shutdown(addr, async {
+            shutdown_rx.await.ok();
+        })
         .await?;
 
+    info!("Gege server shut down.");
     Ok(())
 }

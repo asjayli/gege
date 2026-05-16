@@ -10,25 +10,20 @@ use tonic::{Request, Response, Status};
 
 pub struct AgentPipelineService {
     task_manager: Arc<TaskManager>,
+    auth_token: String,
 }
 
 impl AgentPipelineService {
-    pub fn new() -> Self {
-        Self {
-            task_manager: Arc::new(TaskManager::new()),
-        }
-    }
-    
-    pub fn with_manager(manager: Arc<TaskManager>) -> Self {
+    pub fn with_manager(manager: Arc<TaskManager>, auth_token: String) -> Self {
         Self {
             task_manager: manager,
+            auth_token,
         }
     }
-    
-    // Auth校验辅助方法
+
+    #[allow(clippy::result_large_err)]
     fn check_auth(&self, token: &str) -> Result<(), Status> {
-        // FIXME: 这里简单校验下配置的硬编码Token，生产应使用JWT、mTLS或配置中心的数据
-        if token != "hehe-super-secret-token" {
+        if token != self.auth_token {
             return Err(Status::unauthenticated("Invalid auth token"));
         }
         Ok(())
@@ -39,7 +34,6 @@ impl AgentPipelineService {
 impl AgentPipeline for AgentPipelineService {
     type ExecuteTaskStreamStream = ReceiverStream<Result<TaskResponse, Status>>;
 
-    // 模式一：流式处理
     async fn execute_task_stream(
         &self,
         request: Request<TaskRequest>,
@@ -52,7 +46,7 @@ impl AgentPipeline for AgentPipelineService {
 
         let (tx, rx) = tokio::sync::mpsc::channel(128);
 
-        if let Err(e) = submit_task_internal(self.task_manager.clone(), req, Some(tx)).await {
+        if let Err(e) = self.task_manager.start_task(req, Some(tx)).await {
             error!("Failed to submit streaming task {}: {}", task_id, e);
             return Err(Status::internal("Failed to start task"));
         }
@@ -60,7 +54,6 @@ impl AgentPipeline for AgentPipelineService {
         Ok(Response::new(ReceiverStream::new(rx)))
     }
 
-    // 模式二：提交并回调
     async fn submit_task(
         &self,
         request: Request<TaskRequest>,
@@ -75,8 +68,7 @@ impl AgentPipeline for AgentPipelineService {
             return Err(Status::invalid_argument("callback_url is required for SubmitTask"));
         }
 
-        // None 表示不通过流式 channel 返回结果，而是走内部的 callback 逻辑
-        if let Err(e) = submit_task_internal(self.task_manager.clone(), req, None).await {
+        if let Err(e) = self.task_manager.start_task(req, None).await {
             error!("Failed to submit task {}: {}", task_id, e);
             return Ok(Response::new(SubmitResponse {
                 accepted: false,
@@ -96,7 +88,7 @@ impl AgentPipeline for AgentPipelineService {
     ) -> Result<Response<CancelResponse>, Status> {
         let req = request.into_inner();
         self.check_auth(&req.auth_token)?;
-        
+
         info!("Received cancel request for task: {}", req.task_id);
 
         let success = self.task_manager.cancel_task(&req.task_id).await;
@@ -120,12 +112,4 @@ impl AgentPipeline for AgentPipelineService {
         let status = self.task_manager.get_task_status(&req.task_id).await;
         Ok(Response::new(status))
     }
-}
-
-async fn submit_task_internal(
-    manager: Arc<TaskManager>,
-    req: TaskRequest,
-    tx: Option<tokio::sync::mpsc::Sender<Result<TaskResponse, Status>>>,
-) -> Result<(), anyhow::Error> {
-    manager.start_task(req, tx).await
 }

@@ -89,7 +89,7 @@ pub async fn start_ssh_tunnel(config: SshConfig) {
                 }
             }
             Err(e) => {
-                error!("Failed to spawn SSH process: {}. Is 'ssh' installed? Restarting in 10s...", e);
+                error!("Failed to spawn SSH process: {}. Is 'ssh' installed? Restarting in 5s...", e);
                 sleep(Duration::from_secs(5)).await;
             }
         }
