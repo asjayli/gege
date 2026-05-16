@@ -85,18 +85,8 @@ pub fn strip_markdown_fences(input: &str) -> String {
         after_header.trim()
     };
 
-    // 如果 fence 前面有文字，拼接上（不常见但处理）
-    if fence_start > 0 {
-        let before = trimmed[..fence_start].trim();
-        if before.is_empty() {
-            content.to_string()
-        } else {
-            // fence 前面有礼貌性文字，只返回 fence 内容
-            content.to_string()
-        }
-    } else {
-        content.to_string()
-    }
+    // fence 前面如有礼貌性文字，只返回 fence 内容
+    content.to_string()
 }
 
 /// 去除礼貌性自杀前缀
@@ -104,9 +94,9 @@ pub fn strip_markdown_fences(input: &str) -> String {
 /// LLM 经常在 JSON 前添加礼貌用语，需要剥离
 fn strip_polite_prefix(input: &str) -> (String, bool) {
     let trimmed = input.trim();
+    let lower = trimmed.to_lowercase();
 
     for prefix in POLITE_PREFIXES {
-        let lower = trimmed.to_lowercase();
         let prefix_lower = prefix.to_lowercase();
 
         // 精确前缀匹配（大小写不敏感）
@@ -136,35 +126,47 @@ fn find_json_start(input: &str) -> Option<usize> {
 
 /// 去除 JSON 后缀说明文字
 ///
-/// LLM 经常在 JSON 后添加解释
+/// 通过追踪括号平衡找到 JSON 真正结束的位置，截断其后的说明文字
 fn strip_suffix_explanation(input: &str) -> String {
     let trimmed = input.trim();
 
-    // 如果输入以 } 或 ] 结尾，检查后面是否有说明文字
-    let end_bracket = if trimmed.ends_with('}') {
-        Some('}')
-    } else if trimmed.ends_with(']') {
-        Some(']')
-    } else {
+    // 必须以 { 或 [ 开头才可能是 JSON 带后缀
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
         return input.to_string();
-    };
-
-    let bracket = end_bracket.unwrap();
-
-    // 找到最后一个 } 或 ] 的位置
-    let mut last_bracket_pos = None;
-    for (i, c) in trimmed.char_indices().rev() {
-        if c == bracket {
-            last_bracket_pos = Some(i);
-            break;
-        }
     }
 
-    if let Some(pos) = last_bracket_pos {
-        let after = trimmed[pos + 1..].trim();
-        // 如果 } 或 ] 后面有多于 1 行的文字，截断
-        if after.lines().count() > 1 || (after.len() > 100 && !after.is_empty()) {
-            return trimmed[..=pos].to_string();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut escape = false;
+
+    for (i, c) in trimmed.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if c == '\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if c == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
+        if c == '{' || c == '[' {
+            depth += 1;
+        } else if c == '}' || c == ']' {
+            depth -= 1;
+            if depth == 0 {
+                let end = i + c.len_utf8();
+                let after = trimmed[end..].trim();
+                if !after.is_empty() {
+                    return trimmed[..end].to_string();
+                }
+                return input.to_string();
+            }
         }
     }
 
@@ -375,5 +377,34 @@ mod tests {
         let result = repair_agent_output(input);
         assert!(result.contains("\"key\""));
         assert!(result.contains("\"value\""));
+    }
+
+    #[test]
+    fn test_strip_suffix_single_line() {
+        let input = r#"{"key": "value"} This is the result"#;
+        let cleaned = strip_suffix_explanation(input);
+        assert_eq!(cleaned, r#"{"key": "value"}"#);
+    }
+
+    #[test]
+    fn test_strip_suffix_multiline() {
+        let input = "{\"key\": \"value\"}\nThis is the result\nof the computation";
+        let cleaned = strip_suffix_explanation(input);
+        assert_eq!(cleaned, "{\"key\": \"value\"}");
+    }
+
+    #[test]
+    fn test_strip_suffix_none() {
+        let input = r#"{"key": "value"}"#;
+        let cleaned = strip_suffix_explanation(input);
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn test_clean_agent_output_with_suffix() {
+        let input = "好的，这是结果：\n{\"key\": \"value\"}\n以上是输出结果";
+        let cleaned = clean_agent_output(input);
+        assert!(cleaned.is_json);
+        assert!(cleaned.repairs.contains(&"stripped_suffix_explanation".to_string()));
     }
 }

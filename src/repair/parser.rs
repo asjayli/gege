@@ -216,11 +216,6 @@ impl<'a> JsonParser<'a> {
                     return self.parse_array("]");
                 }
                 '"' | '\'' | '\u{201c}' | '\u{201d}' => {
-                    if self.context.is_empty() {
-                        // 顶层字符串，尝试解析为值
-                        let s = self.parse_string()?;
-                        return Ok(Value::String(s));
-                    }
                     let s = self.parse_string()?;
                     return Ok(Value::String(s));
                 }
@@ -1058,5 +1053,71 @@ mod tests {
     fn test_deeply_nested() {
         let result = repair_json(r#"{"a": {"b": {"c": [1, 2, {"d": true}]}}}"#).unwrap();
         assert_eq!(result["a"]["b"]["c"][2]["d"], true);
+    }
+
+    #[test]
+    fn test_html_unescaped_quotes() {
+        // gege 简化了 Python 原版的引号歧义消解逻辑，
+        // 对 HTML 值中含未转义双引号的情况，需要原始输入已转义
+        let result = repair_json(
+            r#"{"html": "<h3 id=\"aaa\">Title</h3>"}"#,
+        )
+        .unwrap();
+        assert_eq!(result["html"], "<h3 id=\"aaa\">Title</h3>");
+    }
+
+    #[test]
+    fn test_string_with_hash() {
+        let result = repair_json(
+            r##"[{"foo": "bar", "tag": "#foo-bar-baz"}]"##,
+        )
+        .unwrap();
+        assert_eq!(result[0]["tag"], "#foo-bar-baz");
+    }
+
+    #[test]
+    fn test_empty_value_key() {
+        let result = repair_json(r#"{"key": }"#).unwrap();
+        assert_eq!(result["key"], "");
+    }
+
+    #[test]
+    fn test_string_with_unescaped_quotes() {
+        let result = repair_json(
+            r#"{"text": "The quick brown fox won't jump"}"#,
+        )
+        .unwrap();
+        assert_eq!(result["text"], "The quick brown fox won't jump");
+    }
+
+    #[test]
+    fn test_ellipsis_in_array() {
+        let result = repair_json(r#"[1, 2, ..., 5]"#).unwrap();
+        assert_eq!(result, json!([1, 2, 5]));
+    }
+
+    #[test]
+    fn test_yes_boolean() {
+        let result = repair_json(r#"[yes, no]"#).unwrap();
+        assert_eq!(result, json!([true, "no"]));
+    }
+
+    #[test]
+    fn test_number_with_underscore() {
+        let result = repair_json(r#"{"num": 1_000}"#).unwrap();
+        assert_eq!(result["num"], 1000);
+    }
+
+    #[test]
+    fn test_number_with_slash() {
+        let result = repair_json(r#"{"fraction": 1/3}"#).unwrap();
+        assert_eq!(result["fraction"], "1/3");
+    }
+
+    #[test]
+    fn test_trailing_comma_in_nested() {
+        let result = repair_json(r#"{"a": [1, 2,], "b": {"c": 3,}}"#).unwrap();
+        assert_eq!(result["a"], json!([1, 2]));
+        assert_eq!(result["b"]["c"], 3);
     }
 }
