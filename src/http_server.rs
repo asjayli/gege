@@ -63,6 +63,10 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
+    if state.expected_bearer.len() != auth_header.len() {
+        return Err((StatusCode::UNAUTHORIZED, "Invalid auth token".to_string()));
+    }
+
     let equal: bool = state.expected_bearer.as_bytes().ct_eq(auth_header.as_bytes()).into();
     if !equal {
         return Err((StatusCode::UNAUTHORIZED, "Invalid auth token".to_string()));

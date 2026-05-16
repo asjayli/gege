@@ -55,7 +55,12 @@ impl Default for TaskManager {
 impl TaskManager {
     pub fn new() -> Self {
         let tasks: Arc<Mutex<HashMap<String, TaskEntry>>> = Arc::new(Mutex::new(HashMap::new()));
-        let client = Arc::new(reqwest::Client::new());
+        let client = Arc::new(
+            reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .unwrap_or_else(|_| reqwest::Client::new()),
+        );
 
         // 启动后台清理任务，定期移除已完成的旧任务
         let cleanup_tasks = tasks.clone();
@@ -130,7 +135,7 @@ impl TaskManager {
 
             // 重复 ID 检查
             if let Some(entry) = map.get(&task_id) {
-                if entry.handle.is_some() {
+                if entry.handle.is_some() || entry.status == TaskStatus::Running as i32 {
                     return Err(anyhow::anyhow!(
                         "task_id '{}' is already running",
                         task_id
@@ -148,6 +153,9 @@ impl TaskManager {
                     completed_at: None,
                 },
             );
+            
+            // 在锁内增加 running_count，避免与任务完成时的 fetch_sub 发生竞态
+            self.running_count.fetch_add(1, Ordering::SeqCst);
         }
 
         let handle = tokio::spawn(async move {
@@ -163,6 +171,15 @@ impl TaskManager {
             let exec_handle = tokio::spawn(async move {
                 executor.execute(&req, inner_tx).await;
             });
+            
+            // 确保外层 task 被 abort 时，内层 executor 也会被 abort
+            struct AbortOnDrop(tokio::task::JoinHandle<()>);
+            impl Drop for AbortOnDrop {
+                fn drop(&mut self) {
+                    self.0.abort();
+                }
+            }
+            let _abort_guard = AbortOnDrop(exec_handle);
 
             let mut last_status = TaskStatus::Running as i32;
 
@@ -175,7 +192,8 @@ impl TaskManager {
                     Ok(task_res) => {
                         last_status = task_res.status;
 
-                        if !callback_url.is_empty() {
+                        // 仅在任务结束时（非 RUNNING 状态）发送回调，避免每行日志触发一次 HTTP 请求导致风暴
+                        if !callback_url.is_empty() && task_res.status != TaskStatus::Running as i32 {
                             let format_type =
                                 crate::pipeline::CallbackFormat::try_from(callback_format)
                                     .unwrap_or(crate::pipeline::CallbackFormat::Default);
@@ -184,13 +202,13 @@ impl TaskManager {
                                 crate::pipeline::CallbackFormat::FeishuBot => serde_json::json!({
                                     "msg_type": "text",
                                     "content": {
-                                        "text": format!("[Task {} - Status: {}]\n{}", task_res.task_id, task_status_to_string(task_res.status), task_res.log_chunk)
+                                        "text": format!("[Task {} - Status: {}]\n{}", task_res.task_id, task_status_to_string(task_res.status), if task_res.final_result.is_empty() { &task_res.agent_raw } else { &task_res.final_result })
                                     }
                                 }),
                                 crate::pipeline::CallbackFormat::WecomBot => serde_json::json!({
                                     "msgtype": "text",
                                     "text": {
-                                        "content": format!("[Task {} - Status: {}]\n{}", task_res.task_id, task_status_to_string(task_res.status), task_res.log_chunk)
+                                        "content": format!("[Task {} - Status: {}]\n{}", task_res.task_id, task_status_to_string(task_res.status), if task_res.final_result.is_empty() { &task_res.agent_raw } else { &task_res.final_result })
                                     }
                                 }),
                                 _ => serde_json::json!({
@@ -250,19 +268,15 @@ impl TaskManager {
                 }
             }
 
-            let _ = exec_handle.await;
-
             // 更新任务状态（保留在 map 中供查询，标记完成时间供 TTL 清理）
             let mut map = tasks_map_inner.lock().await;
             if let Some(entry) = map.get_mut(&task_id_update) {
-                if entry.handle.is_some() {
-                    entry.handle = None;
-                    running_count.fetch_sub(1, Ordering::SeqCst);
-                }
+                entry.handle = None;
                 entry.status = last_status;
                 entry.message = format!("Task finished with status: {}", task_status_to_string(last_status));
                 entry.completed_at = Some(Instant::now());
             }
+            running_count.fetch_sub(1, Ordering::SeqCst);
             info!("Task {} finished", task_id_update);
         });
 
@@ -270,11 +284,16 @@ impl TaskManager {
         {
             let mut map = self.tasks.lock().await;
             if let Some(entry) = map.get_mut(&task_id) {
-                entry.handle = Some(handle);
-                entry.message = "Task is currently running.".to_string();
+                if entry.status == TaskStatus::Running as i32 {
+                    entry.handle = Some(handle);
+                    entry.message = "Task is currently running.".to_string();
+                } else {
+                    handle.abort();
+                }
+            } else {
+                handle.abort();
             }
         }
-        self.running_count.fetch_add(1, Ordering::SeqCst);
 
         Ok(())
     }
@@ -282,8 +301,10 @@ impl TaskManager {
     pub async fn cancel_task(&self, task_id: &str) -> bool {
         let mut map = self.tasks.lock().await;
         if let Some(entry) = map.get_mut(task_id) {
-            if let Some(handle) = entry.handle.take() {
-                handle.abort();
+            if entry.status == TaskStatus::Running as i32 {
+                if let Some(handle) = entry.handle.take() {
+                    handle.abort();
+                }
                 self.running_count.fetch_sub(1, Ordering::SeqCst);
                 entry.status = TaskStatus::Cancelled as i32;
                 entry.message = "Task was cancelled.".to_string();
@@ -440,5 +461,35 @@ mod tests {
             "CANCELLED"
         );
         assert_eq!(task_status_to_string(999), "UNKNOWN");
+    }
+
+    #[tokio::test]
+    async fn test_task_manager_concurrency_limit() {
+        let mut manager = TaskManager::new();
+        manager.max_concurrent = 2;
+        manager.running_count.store(2, std::sync::atomic::Ordering::SeqCst);
+
+        let mut req = crate::pipeline::TaskRequest::default();
+        req.task_id = "t3".to_string();
+
+        let result = manager.start_task(req, None).await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("max concurrent tasks"));
+    }
+
+    #[tokio::test]
+    async fn test_task_manager_fast_task_running_count() {
+        let manager = TaskManager::new();
+        let mut req = crate::pipeline::TaskRequest::default();
+        req.task_id = "fast".to_string();
+        req.agent_type = AgentType::Unknown as i32; // UnknownExecutor 会立即退出
+
+        assert!(manager.start_task(req, None).await.is_ok());
+        
+        // 等待异步任务执行完毕
+        tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+        
+        // 验证 running_count 是否正确归零，没有发生泄漏
+        assert_eq!(manager.running_count.load(std::sync::atomic::Ordering::SeqCst), 0);
     }
 }

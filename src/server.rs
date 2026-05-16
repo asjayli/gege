@@ -24,6 +24,9 @@ impl AgentPipelineService {
 
     #[allow(clippy::result_large_err)]
     fn check_auth(&self, token: &str) -> Result<(), Status> {
+        if self.auth_token.len() != token.len() {
+            return Err(Status::unauthenticated("Invalid auth token"));
+        }
         let equal: bool = self.auth_token.as_bytes().ct_eq(token.as_bytes()).into();
         if !equal {
             return Err(Status::unauthenticated("Invalid auth token"));
@@ -113,5 +116,22 @@ impl AgentPipeline for AgentPipelineService {
 
         let status = self.task_manager.get_task_status(&req.task_id).await;
         Ok(Response::new(status))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::task_manager::TaskManager;
+
+    #[tokio::test]
+    async fn test_check_auth() {
+        let manager = Arc::new(TaskManager::new());
+        let service = AgentPipelineService::with_manager(manager, "secret123".to_string());
+
+        assert!(service.check_auth("secret123").is_ok());
+        assert!(service.check_auth("wrong").is_err());
+        assert!(service.check_auth("secret124").is_err());
+        assert!(service.check_auth("").is_err());
     }
 }
