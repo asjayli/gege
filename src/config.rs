@@ -35,14 +35,21 @@ impl GegeConfig {
     pub fn from_env() -> Self {
         let auth_token = env::var("GEGE_AUTH_TOKEN")
             .expect("GEGE_AUTH_TOKEN must be set in environment");
-        let local_port = env::var("GEGE_LOCAL_PORT")
+
+        let local_port: u16 = env::var("GEGE_LOCAL_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(50051);
-        let http_port = env::var("GEGE_HTTP_PORT")
+
+        let http_port: u16 = env::var("GEGE_HTTP_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(8081);
+
+        assert!(local_port != 0, "GEGE_LOCAL_PORT must not be 0");
+        assert!(http_port != 0, "GEGE_HTTP_PORT must not be 0");
+        assert!(local_port != http_port, "GEGE_LOCAL_PORT and GEGE_HTTP_PORT must be different");
+
         Self {
             auth_token,
             local_port,

@@ -12,6 +12,6 @@ impl AgentExecutor for CodexExecutor {
     async fn execute(&self, req: &TaskRequest, tx: mpsc::Sender<Result<TaskResponse, Status>>) {
         let mut cmd = Command::new("codex");
         cmd.arg("--query").arg(&req.prompt);
-        execute_command(cmd, req, tx).await;
+        execute_command(cmd, req, tx, None, None).await;
     }
 }

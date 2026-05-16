@@ -12,6 +12,12 @@ use log::{error, info};
 const TASK_RETENTION_TTL_SECS: u64 = 3600;
 /// 清理扫描间隔
 const CLEANUP_INTERVAL_SECS: u64 = 300;
+/// 默认最大并发任务数
+const DEFAULT_MAX_CONCURRENT: usize = 100;
+/// 回调最大重试次数
+const CALLBACK_MAX_RETRIES: u32 = 3;
+/// 回调重试基础延迟（秒）
+const CALLBACK_RETRY_BASE_DELAY_SECS: u64 = 2;
 
 /// TaskStatus 枚举值转可读字符串（用于回调 JSON 序列化）
 pub fn task_status_to_string(status: i32) -> &'static str {
@@ -35,6 +41,7 @@ struct TaskEntry {
 pub struct TaskManager {
     tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
     client: Arc<reqwest::Client>,
+    max_concurrent: usize,
 }
 
 impl Default for TaskManager {
@@ -64,7 +71,7 @@ impl TaskManager {
             }
         });
 
-        Self { tasks, client }
+        Self { tasks, client, max_concurrent: DEFAULT_MAX_CONCURRENT }
     }
 
     pub async fn get_task_status(&self, task_id: &str) -> TaskStatusResponse {
@@ -95,9 +102,28 @@ impl TaskManager {
             return Err(anyhow::anyhow!("task_id must not be empty"));
         }
 
-        // 校验 task_id 不与正在运行的任务冲突
+        let tasks_map_inner = self.tasks.clone();
+        let task_id_spawned = task_id.clone();
+        let task_id_update = task_id.clone();
+        let client = self.client.clone();
+        let max_concurrent = self.max_concurrent;
+
+        let executor = factory::create_executor(&req.agent_type());
+
+        // 原子性检查重复 + 并发上限 + 插入，消除 TOCTOU 竞态
         {
-            let map = self.tasks.lock().await;
+            let mut map = self.tasks.lock().await;
+
+            // 并发上限检查
+            let running_count = map.values().filter(|e| e.handle.is_some()).count();
+            if running_count >= max_concurrent {
+                return Err(anyhow::anyhow!(
+                    "max concurrent tasks ({}) reached",
+                    max_concurrent
+                ));
+            }
+
+            // 重复 ID 检查
             if let Some(entry) = map.get(&task_id) {
                 if entry.handle.is_some() {
                     return Err(anyhow::anyhow!(
@@ -106,17 +132,21 @@ impl TaskManager {
                     ));
                 }
             }
+
+            // 插入占位
+            map.insert(
+                task_id.clone(),
+                TaskEntry {
+                    handle: None,
+                    status: TaskStatus::Running as i32,
+                    message: "Task is initializing.".to_string(),
+                    completed_at: None,
+                },
+            );
         }
 
-        let tasks_map = self.tasks.clone();
-        let task_id_for_map = task_id.clone();
-        let task_id_for_entry = task_id.clone();
-        let client = self.client.clone();
-
-        let executor = factory::create_executor(&req.agent_type());
-
         let handle = tokio::spawn(async move {
-            info!("Starting execution for task {}", task_id);
+            info!("Starting execution for task {}", task_id_spawned);
 
             let (inner_tx, mut internal_rx) = mpsc::channel(128);
 
@@ -141,12 +171,6 @@ impl TaskManager {
                         last_status = task_res.status;
 
                         if !callback_url.is_empty() {
-                            let mut request_builder = client.post(&callback_url);
-
-                            for (k, v) in &callback_headers {
-                                request_builder = request_builder.header(k, v);
-                            }
-
                             let format_type =
                                 crate::pipeline::CallbackFormat::try_from(callback_format)
                                     .unwrap_or(crate::pipeline::CallbackFormat::Default);
@@ -168,35 +192,55 @@ impl TaskManager {
                                     "taskId": task_res.task_id,
                                     "status": task_status_to_string(task_res.status),
                                     "logChunk": task_res.log_chunk,
-                                    "finalResult": task_res.final_result
+                                    "finalResult": task_res.final_result,
+                                    "agentText": task_res.agent_text,
+                                    "agentRaw": task_res.agent_raw,
+                                    "sessionId": task_res.session_id,
+                                    "parsed": task_res.parsed
                                 }),
                             };
 
-                            // 异步发送回调，避免阻塞 internal_rx 消费循环
-                            let task_id_cb = task_res.task_id.clone();
+                            // 异步发送回调（含重试），避免阻塞 internal_rx 消费循环
+                            let cb_url = callback_url.clone();
+                            let cb_headers = callback_headers.clone();
+                            let cb_task_id = task_res.task_id.clone();
+                            let cb_client = client.clone();
                             tokio::spawn(async move {
-                                match request_builder.json(&payload).send().await {
-                                    Ok(r) if !r.status().is_success() => {
-                                        error!(
-                                            "Callback failed for task {} with status {}",
-                                            task_id_cb,
-                                            r.status()
-                                        );
+                                for attempt in 0..=CALLBACK_MAX_RETRIES {
+                                    let mut request_builder = cb_client.post(&cb_url);
+                                    for (k, v) in &cb_headers {
+                                        request_builder = request_builder.header(k, v);
                                     }
-                                    Err(e) => {
-                                        error!(
-                                            "Callback network error for task {}: {}",
-                                            task_id_cb, e
-                                        );
+
+                                    match request_builder.json(&payload).send().await {
+                                        Ok(r) if r.status().is_success() => break,
+                                        Ok(r) => {
+                                            error!(
+                                                "Callback failed for task {} with status {} (attempt {}/{})",
+                                                cb_task_id, r.status(), attempt + 1, CALLBACK_MAX_RETRIES + 1
+                                            );
+                                        }
+                                        Err(e) => {
+                                            error!(
+                                                "Callback network error for task {}: {} (attempt {}/{})",
+                                                cb_task_id, e, attempt + 1, CALLBACK_MAX_RETRIES + 1
+                                            );
+                                        }
                                     }
-                                    _ => {}
+
+                                    if attempt < CALLBACK_MAX_RETRIES {
+                                        tokio::time::sleep(Duration::from_secs(
+                                            CALLBACK_RETRY_BASE_DELAY_SECS * (attempt as u64 + 1),
+                                        ))
+                                        .await;
+                                    }
                                 }
                             });
                         }
                     }
                     Err(e) => {
                         last_status = TaskStatus::Failed as i32;
-                        error!("Executor returned error for task {}: {}", task_id, e);
+                        error!("Executor returned error for task {}: {}", task_id_spawned, e);
                     }
                 }
             }
@@ -204,26 +248,25 @@ impl TaskManager {
             let _ = exec_handle.await;
 
             // 更新任务状态（保留在 map 中供查询，标记完成时间供 TTL 清理）
-            let mut map = tasks_map.lock().await;
-            if let Some(entry) = map.get_mut(&task_id_for_map) {
+            let mut map = tasks_map_inner.lock().await;
+            if let Some(entry) = map.get_mut(&task_id_update) {
                 entry.handle = None;
                 entry.status = last_status;
                 entry.message = format!("Task finished with status: {}", task_status_to_string(last_status));
                 entry.completed_at = Some(Instant::now());
             }
-            info!("Task {} finished", task_id_for_map);
+            info!("Task {} finished", task_id_update);
         });
 
-        // 插入时记录初始状态
-        self.tasks.lock().await.insert(
-            task_id_for_entry,
-            TaskEntry {
-                handle: Some(handle),
-                status: TaskStatus::Running as i32,
-                message: "Task is currently running.".to_string(),
-                completed_at: None,
-            },
-        );
+        // 更新占位条目为实际的 JoinHandle
+        {
+            let mut map = self.tasks.lock().await;
+            if let Some(entry) = map.get_mut(&task_id) {
+                entry.handle = Some(handle);
+                entry.message = "Task is currently running.".to_string();
+            }
+        }
+
         Ok(())
     }
 

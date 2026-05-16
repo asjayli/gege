@@ -67,6 +67,10 @@ message TaskResponse {
   TaskStatus status = 2;
   string log_chunk = 3;           // 实时的 stdout/stderr 输出日志块
   string final_result = 4;        // 结束后，如果工具有结构化输出可以放在这里
+  string agent_text = 5;          // gege 提取后的稳定文本
+  string agent_raw = 6;           // agent 原始输出（未加工）
+  string session_id = 7;          // Agent 会话标识（由 agent 在结果标记中返回）
+  bool parsed = 8;                // gege 是否成功从输出中解析出标记结果
 }
 
 message CancelRequest {

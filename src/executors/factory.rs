@@ -32,25 +32,40 @@ pub fn create_executor(agent_type: &AgentType) -> Arc<dyn AgentExecutor> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::pipeline::AgentType;
+
+    #[tokio::test]
+    async fn test_unknown_executor_returns_error() {
+        let executor = create_executor(&AgentType::Unknown);
+        let (tx, mut rx) = mpsc::channel(1);
+
+        let req = TaskRequest {
+            task_id: "test".to_string(),
+            agent_type: AgentType::Unknown as i32,
+            prompt: String::new(),
+            workspace_dir: String::new(),
+            env_vars: Default::default(),
+            timeout_seconds: 0,
+            auth_token: String::new(),
+            callback_url: String::new(),
+            callback_headers: Default::default(),
+            callback_format: 0,
+        };
+
+        executor.execute(&req, tx).await;
+        let result = rx.recv().await.unwrap();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("Unknown agent type"));
+    }
 
     #[test]
-    fn test_create_executor() {
-        let claude = create_executor(&AgentType::ClaudeCode);
-        assert!(Arc::ptr_eq(&claude, &claude)); // Basic validity check
-
-        let gemini = create_executor(&AgentType::GeminiCli);
-        assert!(Arc::ptr_eq(&gemini, &gemini));
-
-        let codex = create_executor(&AgentType::Codex);
-        assert!(Arc::ptr_eq(&codex, &codex));
-
-        let opencode = create_executor(&AgentType::OpenCode);
-        assert!(Arc::ptr_eq(&opencode, &opencode));
-
-        let hehe = create_executor(&AgentType::HeheNative);
-        assert!(Arc::ptr_eq(&hehe, &hehe));
-
-        let unknown = create_executor(&AgentType::Unknown);
-        assert!(Arc::ptr_eq(&unknown, &unknown));
+    fn test_create_executor_all_types() {
+        // 验证各类型都能成功创建 executor
+        let _ = create_executor(&AgentType::ClaudeCode);
+        let _ = create_executor(&AgentType::GeminiCli);
+        let _ = create_executor(&AgentType::Codex);
+        let _ = create_executor(&AgentType::OpenCode);
+        let _ = create_executor(&AgentType::HeheNative);
+        let _ = create_executor(&AgentType::Unknown);
     }
 }

@@ -4,6 +4,7 @@ pub mod pipeline {
 
 pub mod config;
 pub mod executors;
+pub mod repair;
 pub mod server;
 pub mod task_manager;
 pub mod ssh_tunnel;
@@ -31,12 +32,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // 共享 TaskManager
     let task_manager = std::sync::Arc::new(task_manager::TaskManager::new());
 
+    // HTTP Server 停机信号
+    let (http_shutdown_tx, http_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+
     // HTTP Server
     let http_tm = task_manager.clone();
     let http_auth = cfg.auth_token.clone();
     let http_port = cfg.http_port;
     tokio::spawn(async move {
-        http_server::start_http_server(http_tm, http_port, http_auth).await;
+        http_server::start_http_server(http_tm, http_port, http_auth, http_shutdown_rx).await;
     });
 
     // gRPC Server + 优雅停机
@@ -46,17 +50,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     info!("Gege Proxy Layer Server listening on {}", addr);
 
-    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
+    let (grpc_shutdown_tx, grpc_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         info!("Received shutdown signal, stopping gracefully...");
-        let _ = shutdown_tx.send(());
+        let _ = grpc_shutdown_tx.send(());
+        let _ = http_shutdown_tx.send(());
     });
 
     Server::builder()
         .add_service(AgentPipelineServer::new(pipeline_service))
         .serve_with_shutdown(addr, async {
-            shutdown_rx.await.ok();
+            grpc_shutdown_rx.await.ok();
         })
         .await?;
 

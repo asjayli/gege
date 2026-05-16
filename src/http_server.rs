@@ -16,7 +16,7 @@ use subtle::ConstantTimeEq;
 #[derive(Clone)]
 pub struct AppState {
     pub task_manager: Arc<TaskManager>,
-    pub auth_token: String,
+    pub expected_bearer: String,
 }
 
 #[derive(Deserialize)]
@@ -39,6 +39,12 @@ pub struct SubmitTaskResponse {
 }
 
 #[derive(Serialize)]
+pub struct CancelTaskResponse {
+    pub success: bool,
+    pub message: String,
+}
+
+#[derive(Serialize)]
 pub struct TaskStatusJson {
     pub exists: bool,
     pub status: String,
@@ -57,8 +63,7 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let expected = format!("Bearer {}", state.auth_token);
-    let equal: bool = expected.as_bytes().ct_eq(auth_header.as_bytes()).into();
+    let equal: bool = state.expected_bearer.as_bytes().ct_eq(auth_header.as_bytes()).into();
     if !equal {
         return Err((StatusCode::UNAUTHORIZED, "Invalid auth token".to_string()));
     }
@@ -66,13 +71,23 @@ async fn auth_middleware(
     Ok(next.run(req).await)
 }
 
-pub async fn start_http_server(task_manager: Arc<TaskManager>, port: u16, auth_token: String) {
+async fn health_check() -> &'static str {
+    "ok"
+}
+
+pub async fn start_http_server(
+    task_manager: Arc<TaskManager>,
+    port: u16,
+    auth_token: String,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
+) {
     let state = AppState {
         task_manager,
-        auth_token,
+        expected_bearer: format!("Bearer {}", auth_token),
     };
 
     let app = Router::new()
+        .route("/health", get(health_check))
         .route("/v1/tasks", post(submit_task))
         .route("/v1/tasks/{task_id}", get(get_task_status).delete(cancel_task))
         .layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
@@ -81,8 +96,22 @@ pub async fn start_http_server(task_manager: Arc<TaskManager>, port: u16, auth_t
     let addr = format!("127.0.0.1:{}", port);
     info!("Gege HTTP REST API listening on {}", addr);
 
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
+    let listener = match tokio::net::TcpListener::bind(&addr).await {
+        Ok(l) => l,
+        Err(e) => {
+            info!("Failed to bind HTTP server on {}: {}", addr, e);
+            return;
+        }
+    };
+
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = shutdown_rx.await;
+        })
+        .await
+        .unwrap_or_else(|e| {
+            info!("HTTP server error: {}", e);
+        });
 }
 
 async fn submit_task(
@@ -158,11 +187,11 @@ async fn get_task_status(
 async fn cancel_task(
     State(state): State<AppState>,
     Path(task_id): Path<String>,
-) -> Result<Json<SubmitTaskResponse>, (StatusCode, String)> {
+) -> Result<Json<CancelTaskResponse>, (StatusCode, String)> {
     let success = state.task_manager.cancel_task(&task_id).await;
 
-    Ok(Json(SubmitTaskResponse {
-        accepted: success,
+    Ok(Json(CancelTaskResponse {
+        success,
         message: if success {
             "Task cancelled successfully".to_string()
         } else {
@@ -179,7 +208,7 @@ mod tests {
     fn test_state() -> AppState {
         AppState {
             task_manager: Arc::new(TaskManager::new()),
-            auth_token: "test-token".to_string(),
+            expected_bearer: "Bearer test-token".to_string(),
         }
     }
 
@@ -241,5 +270,11 @@ mod tests {
         let result = submit_task(State(state), Json(payload)).await;
         assert!(result.is_ok());
         assert!(result.unwrap().accepted);
+    }
+
+    #[tokio::test]
+    async fn test_health_check() {
+        let result = health_check().await;
+        assert_eq!(result, "ok");
     }
 }
