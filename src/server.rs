@@ -5,6 +5,7 @@ use crate::pipeline::{
 use crate::task_manager::TaskManager;
 use log::{error, info};
 use std::sync::Arc;
+use subtle::ConstantTimeEq;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 
@@ -23,7 +24,8 @@ impl AgentPipelineService {
 
     #[allow(clippy::result_large_err)]
     fn check_auth(&self, token: &str) -> Result<(), Status> {
-        if token != self.auth_token {
+        let equal: bool = self.auth_token.as_bytes().ct_eq(token.as_bytes()).into();
+        if !equal {
             return Err(Status::unauthenticated("Invalid auth token"));
         }
         Ok(())

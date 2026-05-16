@@ -20,6 +20,7 @@ anyhow = "1.0"
 async-trait = "0.1.89"
 reqwest = { version = "0.13.3", features = ["json"] }
 axum = "0.8.9"
+subtle = "2.6"
 
 [build-dependencies]
 protoc-bin-vendored = "3.2.0"

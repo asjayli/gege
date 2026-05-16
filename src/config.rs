@@ -34,7 +34,7 @@ pub struct GegeConfig {
 impl GegeConfig {
     pub fn from_env() -> Self {
         let auth_token = env::var("GEGE_AUTH_TOKEN")
-            .unwrap_or_else(|_| "hehe-super-secret-token".to_string());
+            .expect("GEGE_AUTH_TOKEN must be set in environment");
         let local_port = env::var("GEGE_LOCAL_PORT")
             .ok()
             .and_then(|v| v.parse().ok())

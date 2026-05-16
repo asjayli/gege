@@ -93,30 +93,48 @@ pub async fn execute_command(
     let tx_stdout = tx.clone();
     let task_id_stdout = req.task_id.clone();
     let stdout_handle = tokio::spawn(async move {
-        while let Ok(Some(line)) = stdout_reader.next_line().await {
-            let _ = tx_stdout
-                .send(Ok(TaskResponse {
-                    task_id: task_id_stdout.clone(),
-                    status: TaskStatus::Running as i32,
-                    log_chunk: format!("OUT: {}\n", line),
-                    final_result: String::new(),
-                }))
-                .await;
+        loop {
+            match stdout_reader.next_line().await {
+                Ok(Some(line)) => {
+                    let _ = tx_stdout
+                        .send(Ok(TaskResponse {
+                            task_id: task_id_stdout.clone(),
+                            status: TaskStatus::Running as i32,
+                            log_chunk: format!("OUT: {}\n", line),
+                            final_result: String::new(),
+                        }))
+                        .await;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    error!("Error reading stdout for task {}: {}", task_id_stdout, e);
+                    break;
+                }
+            }
         }
     });
 
     let tx_stderr = tx.clone();
     let task_id_stderr = req.task_id.clone();
     let stderr_handle = tokio::spawn(async move {
-        while let Ok(Some(line)) = stderr_reader.next_line().await {
-            let _ = tx_stderr
-                .send(Ok(TaskResponse {
-                    task_id: task_id_stderr.clone(),
-                    status: TaskStatus::Running as i32,
-                    log_chunk: format!("ERR: {}\n", line),
-                    final_result: String::new(),
-                }))
-                .await;
+        loop {
+            match stderr_reader.next_line().await {
+                Ok(Some(line)) => {
+                    let _ = tx_stderr
+                        .send(Ok(TaskResponse {
+                            task_id: task_id_stderr.clone(),
+                            status: TaskStatus::Running as i32,
+                            log_chunk: format!("ERR: {}\n", line),
+                            final_result: String::new(),
+                        }))
+                        .await;
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    error!("Error reading stderr for task {}: {}", task_id_stderr, e);
+                    break;
+                }
+            }
         }
     });
 

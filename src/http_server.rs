@@ -3,14 +3,15 @@ use crate::task_manager::{task_status_to_string, TaskManager};
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::{get, post},
-    Json, Router,
     middleware::{self, Next},
     extract::Request,
+    routing::{get, post},
+    Json, Router,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use log::info;
+use subtle::ConstantTimeEq;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -57,7 +58,8 @@ async fn auth_middleware(
         .unwrap_or("");
 
     let expected = format!("Bearer {}", state.auth_token);
-    if auth_header != expected {
+    let equal: bool = expected.as_bytes().ct_eq(auth_header.as_bytes()).into();
+    if !equal {
         return Err((StatusCode::UNAUTHORIZED, "Invalid auth token".to_string()));
     }
 
@@ -100,7 +102,12 @@ async fn submit_task(
         "CODEX" => AgentType::Codex,
         "OPEN_CODE" => AgentType::OpenCode,
         "HEHE_NATIVE" => AgentType::HeheNative,
-        _ => AgentType::Unknown,
+        _ => {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("Invalid agent_type: {}", payload.agent_type),
+            ));
+        }
     };
 
     let callback_format = match payload.callback_format.as_deref() {
@@ -181,7 +188,7 @@ mod tests {
         let state = test_state();
         let payload = SubmitTaskPayload {
             task_id: "test1".to_string(),
-            agent_type: "UNKNOWN".to_string(),
+            agent_type: "CLAUDE_CODE".to_string(),
             prompt: "hello".to_string(),
             workspace_dir: None,
             env_vars: None,
@@ -197,11 +204,31 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_submit_task_invalid_agent_type() {
+        let state = test_state();
+        let payload = SubmitTaskPayload {
+            task_id: "test1".to_string(),
+            agent_type: "INVALID_AGENT".to_string(),
+            prompt: "hello".to_string(),
+            workspace_dir: None,
+            env_vars: None,
+            timeout_seconds: None,
+            callback_url: "http://localhost/cb".to_string(),
+            callback_headers: None,
+            callback_format: None,
+        };
+
+        let result = submit_task(State(state), Json(payload)).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().0, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
     async fn test_submit_task_success() {
         let state = test_state();
         let payload = SubmitTaskPayload {
             task_id: "test1".to_string(),
-            agent_type: "UNKNOWN".to_string(),
+            agent_type: "CLAUDE_CODE".to_string(),
             prompt: "hello".to_string(),
             workspace_dir: None,
             env_vars: None,
