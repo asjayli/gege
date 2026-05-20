@@ -51,6 +51,14 @@ pub struct TaskStatusJson {
     pub message: String,
 }
 
+/// 校验 Bearer Token（常量时间比较，防时序攻击）
+fn verify_bearer_token(expected: &str, actual: &str) -> bool {
+    if expected.len() != actual.len() {
+        return false;
+    }
+    expected.as_bytes().ct_eq(actual.as_bytes()).into()
+}
+
 /// 鉴权中间件：校验 Authorization: Bearer <token>
 async fn auth_middleware(
     State(state): State<AppState>,
@@ -63,12 +71,7 @@ async fn auth_middleware(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    if state.expected_bearer.len() != auth_header.len() {
-        return Err((StatusCode::UNAUTHORIZED, "Invalid auth token".to_string()));
-    }
-
-    let equal: bool = state.expected_bearer.as_bytes().ct_eq(auth_header.as_bytes()).into();
-    if !equal {
+    if !verify_bearer_token(&state.expected_bearer, auth_header) {
         return Err((StatusCode::UNAUTHORIZED, "Invalid auth token".to_string()));
     }
 
@@ -208,12 +211,97 @@ async fn cancel_task(
 mod tests {
     use super::*;
     use crate::task_manager::TaskManager;
+    use axum::http::StatusCode;
 
     fn test_state() -> AppState {
         AppState {
             task_manager: Arc::new(TaskManager::new()),
             expected_bearer: "Bearer test-token".to_string(),
         }
+    }
+
+    #[test]
+    fn test_verify_bearer_token_valid() {
+        assert!(verify_bearer_token("Bearer test-token", "Bearer test-token"));
+    }
+
+    #[test]
+    fn test_verify_bearer_token_invalid() {
+        assert!(!verify_bearer_token("Bearer test-token", "Bearer wrong-token"));
+    }
+
+    #[test]
+    fn test_verify_bearer_token_empty() {
+        assert!(!verify_bearer_token("Bearer test-token", ""));
+        assert!(!verify_bearer_token("", "Bearer test-token"));
+    }
+
+    #[test]
+    fn test_verify_bearer_token_length_mismatch() {
+        assert!(!verify_bearer_token("Bearer test-token", "Bearer x"));
+    }
+
+    #[tokio::test]
+    async fn test_get_task_status_existing() {
+        let state = test_state();
+        let req = TaskRequest {
+            task_id: "status-task".to_string(),
+            agent_type: crate::pipeline::AgentType::Unknown as i32,
+            prompt: "test".to_string(),
+            workspace_dir: "".to_string(),
+            env_vars: Default::default(),
+            timeout_seconds: 3600,
+            auth_token: "token".to_string(),
+            callback_url: "".to_string(),
+            callback_headers: Default::default(),
+            callback_format: 0,
+        };
+        let _ = state.task_manager.start_task(req, None).await;
+
+        let result = get_task_status(State(state), Path("status-task".to_string())).await;
+        assert!(result.is_ok());
+        let json = result.unwrap().0;
+        assert!(json.exists);
+    }
+
+    #[tokio::test]
+    async fn test_get_task_status_not_found() {
+        let state = test_state();
+        let result = get_task_status(State(state), Path("no-such-task".to_string())).await;
+        assert!(result.is_ok());
+        let json = result.unwrap().0;
+        assert!(!json.exists);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_task_existing() {
+        let state = test_state();
+        let handle = tokio::spawn(async move {
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+        });
+        state.task_manager.tasks.lock().await.insert(
+            "cancel-task".to_string(),
+            crate::task_manager::TaskEntry {
+                handle: Some(handle),
+                status: crate::pipeline::TaskStatus::Running as i32,
+                message: "Running".to_string(),
+                completed_at: None,
+            },
+        );
+
+        let result = cancel_task(State(state), Path("cancel-task".to_string())).await;
+        assert!(result.is_ok());
+        let json = result.unwrap().0;
+        assert!(json.success);
+    }
+
+    #[tokio::test]
+    async fn test_cancel_task_not_found() {
+        let state = test_state();
+        let result = cancel_task(State(state), Path("no-such-task".to_string())).await;
+        assert!(result.is_ok());
+        let json = result.unwrap().0;
+        assert!(!json.success);
     }
 
     #[tokio::test]

@@ -407,4 +407,67 @@ mod tests {
         assert!(cleaned.is_json);
         assert!(cleaned.repairs.contains(&"stripped_suffix_explanation".to_string()));
     }
+
+    #[test]
+    fn test_strip_markdown_fences_unclosed() {
+        let input = "```json\n{\"key\": \"value\"}\n";
+        let result = strip_markdown_fences(input);
+        assert_eq!(result, "{\"key\": \"value\"}");
+    }
+
+    #[test]
+    fn test_strip_markdown_fences_inline() {
+        let input = "Here is the result:\n```\n{\"key\": \"value\"}\n```";
+        let result = strip_markdown_fences(input);
+        assert_eq!(result, "{\"key\": \"value\"}");
+    }
+
+    #[test]
+    fn test_extract_json_part_array() {
+        let result = extract_json_part("The array is: [1, 2, 3]");
+        assert_eq!(result, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_extract_json_part_no_json() {
+        let result = extract_json_part("No json here at all");
+        assert_eq!(result, "No json here at all");
+    }
+
+    #[test]
+    fn test_strip_suffix_explanation_array() {
+        let input = "[1, 2, 3] This is extra";
+        let cleaned = strip_suffix_explanation(input);
+        assert_eq!(cleaned, "[1, 2, 3]");
+    }
+
+    #[test]
+    fn test_strip_suffix_explanation_no_brackets() {
+        let input = "plain text with no brackets";
+        let cleaned = strip_suffix_explanation(input);
+        assert_eq!(cleaned, input);
+    }
+
+    #[test]
+    fn test_strip_polite_prefix_mixed_case() {
+        let (result, stripped) = strip_polite_prefix("sUrE, hErE iS {\"a\": 1}");
+        assert!(stripped);
+        assert!(result.starts_with('{'));
+    }
+
+    #[test]
+    fn test_clean_agent_output_only_fence() {
+        let input = "```\n{\"key\": \"value\"}\n```";
+        let cleaned = clean_agent_output(input);
+        assert!(cleaned.is_json);
+        assert_eq!(cleaned.json_value.unwrap()["key"], "value");
+    }
+
+    #[test]
+    fn test_clean_agent_output_array_with_suffix() {
+        let input = "Sure! Here is the result:\n[1, 2, 3]\nThat's all.";
+        let cleaned = clean_agent_output(input);
+        assert!(cleaned.is_json);
+        assert_eq!(cleaned.json_value.unwrap(), serde_json::json!([1, 2, 3]));
+    }
 }

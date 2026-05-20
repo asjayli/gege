@@ -32,15 +32,15 @@ pub fn task_status_to_string(status: i32) -> &'static str {
     }
 }
 
-struct TaskEntry {
-    handle: Option<JoinHandle<()>>,
-    status: i32,
-    message: String,
-    completed_at: Option<Instant>,
+pub(crate) struct TaskEntry {
+    pub(crate) handle: Option<JoinHandle<()>>,
+    pub(crate) status: i32,
+    pub(crate) message: String,
+    pub(crate) completed_at: Option<Instant>,
 }
 
 pub struct TaskManager {
-    tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
+    pub(crate) tasks: Arc<Mutex<HashMap<String, TaskEntry>>>,
     client: Arc<reqwest::Client>,
     max_concurrent: usize,
     running_count: Arc<AtomicUsize>,
