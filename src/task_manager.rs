@@ -32,6 +32,58 @@ pub fn task_status_to_string(status: i32) -> &'static str {
     }
 }
 
+/// 将 Gege 回调 enrich 为 xixi AgentTaskCallbackDto 兼容格式。
+fn enrich_callback_payload(mut payload: serde_json::Value, metadata_json: &str) -> serde_json::Value {
+    if let Some(obj) = payload.as_object_mut() {
+        let output = obj
+            .get("finalResult")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .or_else(|| obj.get("agentRaw").and_then(|v| v.as_str()))
+            .unwrap_or("");
+        obj.insert(
+            "outputData".to_string(),
+            serde_json::Value::String(output.to_string()),
+        );
+        if !metadata_json.is_empty() {
+            obj.insert(
+                "metadataJson".to_string(),
+                serde_json::Value::String(metadata_json.to_string()),
+            );
+            if let Ok(meta) = serde_json::from_str::<serde_json::Value>(metadata_json) {
+                if let Some(meta_obj) = meta.as_object() {
+                    copy_meta_field(obj, meta_obj, "flowInstanceId", "flowInstId");
+                    copy_meta_field(obj, meta_obj, "flowInstId", "flowInstId");
+                    copy_meta_field(obj, meta_obj, "lockId", "lockId");
+                    copy_meta_field(obj, meta_obj, "outputVarKey", "outputVarKey");
+                    copy_meta_field(obj, meta_obj, "employeeId", "employeeId");
+                    copy_meta_field(obj, meta_obj, "agentCode", "employeeId");
+                    copy_meta_field(obj, meta_obj, "agentRunId", "agentRunId");
+                    copy_meta_field(obj, meta_obj, "equipmentLoadoutJson", "equipmentLoadoutJson");
+                    copy_meta_field(obj, meta_obj, "taskType", "taskType");
+                    copy_meta_field(obj, meta_obj, "smartPlanFlowCode", "smartPlanFlowCode");
+                    copy_meta_field(obj, meta_obj, "publishUrl", "publishUrl");
+                }
+            }
+        }
+    }
+    payload
+}
+
+fn copy_meta_field(
+    target: &mut serde_json::Map<String, serde_json::Value>,
+    source: &serde_json::Map<String, serde_json::Value>,
+    source_key: &str,
+    target_key: &str,
+) {
+    if target.contains_key(target_key) {
+        return;
+    }
+    if let Some(value) = source.get(source_key) {
+        target.insert(target_key.to_string(), value.clone());
+    }
+}
+
 pub(crate) struct TaskEntry {
     pub(crate) handle: Option<JoinHandle<()>>,
     pub(crate) status: i32,
@@ -167,6 +219,7 @@ impl TaskManager {
             let callback_url = req.callback_url.clone();
             let callback_headers = req.callback_headers.clone();
             let callback_format = req.callback_format;
+            let metadata_json = req.metadata_json.clone();
 
             let exec_handle = tokio::spawn(async move {
                 executor.execute(&req, inner_tx).await;
@@ -211,7 +264,7 @@ impl TaskManager {
                                         "content": format!("[Task {} - Status: {}]\n{}", task_res.task_id, task_status_to_string(task_res.status), if task_res.final_result.is_empty() { &task_res.agent_raw } else { &task_res.final_result })
                                     }
                                 }),
-                                _ => serde_json::json!({
+                                _ => enrich_callback_payload(serde_json::json!({
                                     "taskId": task_res.task_id,
                                     "status": task_status_to_string(task_res.status),
                                     "logChunk": task_res.log_chunk,
@@ -220,7 +273,7 @@ impl TaskManager {
                                     "agentRaw": task_res.agent_raw,
                                     "sessionId": task_res.session_id,
                                     "parsed": task_res.parsed
-                                }),
+                                }), &metadata_json),
                             };
 
                             // 异步发送回调（含重试），避免阻塞 internal_rx 消费循环
@@ -341,6 +394,7 @@ mod tests {
             callback_url: "".to_string(),
             callback_headers: Default::default(),
             callback_format: 0,
+            metadata_json: String::new(),
         };
 
         let result = manager.start_task(req, None).await;
@@ -377,6 +431,7 @@ mod tests {
             callback_url: "".to_string(),
             callback_headers: Default::default(),
             callback_format: 0,
+            metadata_json: String::new(),
         };
 
         let result = manager.start_task(req, None).await;
@@ -398,6 +453,7 @@ mod tests {
             callback_url: "".to_string(),
             callback_headers: Default::default(),
             callback_format: 0,
+            metadata_json: String::new(),
         };
 
         let result = manager.start_task(req, None).await;

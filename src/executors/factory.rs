@@ -50,6 +50,7 @@ mod tests {
             callback_url: String::new(),
             callback_headers: Default::default(),
             callback_format: 0,
+            metadata_json: String::new(),
         };
 
         executor.execute(&req, tx).await;

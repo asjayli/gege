@@ -12,6 +12,9 @@ impl AgentExecutor for HeheExecutor {
     async fn execute(&self, req: &TaskRequest, tx: mpsc::Sender<Result<TaskResponse, Status>>) {
         let mut cmd = Command::new("hehe");
         cmd.arg("run").arg("--instruction").arg(&req.prompt);
+        if !req.metadata_json.is_empty() {
+            cmd.env("GEGE_TASK_METADATA", &req.metadata_json);
+        }
         execute_command(cmd, req, tx, None, None).await;
     }
 }

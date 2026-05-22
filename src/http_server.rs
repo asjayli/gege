@@ -30,6 +30,7 @@ pub struct SubmitTaskPayload {
     pub callback_url: String,
     pub callback_headers: Option<std::collections::HashMap<String, String>>,
     pub callback_format: Option<String>,
+    pub metadata_json: Option<String>,
 }
 
 #[derive(Serialize, Debug)]
@@ -163,6 +164,7 @@ async fn submit_task(
         callback_url: payload.callback_url,
         callback_headers: payload.callback_headers.unwrap_or_default(),
         callback_format: callback_format as i32,
+        metadata_json: payload.metadata_json.unwrap_or_default(),
     };
 
     if let Err(e) = state.task_manager.start_task(req, None).await {
@@ -255,6 +257,7 @@ mod tests {
             callback_url: "".to_string(),
             callback_headers: Default::default(),
             callback_format: 0,
+            metadata_json: String::new(),
         };
         let _ = state.task_manager.start_task(req, None).await;
 
@@ -317,6 +320,7 @@ mod tests {
             callback_url: "".to_string(),
             callback_headers: None,
             callback_format: None,
+            metadata_json: None,
         };
 
         let result = submit_task(State(state), Json(payload)).await;
@@ -337,6 +341,7 @@ mod tests {
             callback_url: "http://localhost/cb".to_string(),
             callback_headers: None,
             callback_format: None,
+            metadata_json: None,
         };
 
         let result = submit_task(State(state), Json(payload)).await;
@@ -357,6 +362,7 @@ mod tests {
             callback_url: "http://localhost/cb".to_string(),
             callback_headers: None,
             callback_format: None,
+            metadata_json: None,
         };
 
         let result = submit_task(State(state), Json(payload)).await;

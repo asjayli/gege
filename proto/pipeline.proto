@@ -47,6 +47,7 @@ message TaskRequest {
   string callback_url = 8;        // Java端接收回调的REST/HTTP地址
   map<string, string> callback_headers = 9; // [新增] 回调时携带的 HTTP Headers (用于签名或Java鉴权)
   CallbackFormat callback_format = 10;      // [新增] 适配各大厂商机器人的 Webhook 格式
+  string metadata_json = 11;                // 编排元数据（flowInstId/lockId/employeeId 等）
 }
 
 message SubmitResponse {
